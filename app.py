@@ -22,8 +22,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 current_batch_indices = {}
 batch_indices_lock = threading.Lock()
 
-# Token paths (can be overridden via env vars)
-# Gets the absolute path of the directory containing app.py
+# Token paths logic
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN_BASE_DIR = os.environ.get("TOKEN_DIR", CURRENT_DIR)
 
@@ -51,7 +50,6 @@ def get_next_batch_tokens(server_name, all_tokens):
         return []
     
     total_tokens = len(all_tokens)
-    
     if total_tokens <= TOKEN_BATCH_SIZE:
         return all_tokens
     
@@ -79,7 +77,6 @@ def get_random_batch_tokens(server_name, all_tokens):
         return []
     
     total_tokens = len(all_tokens)
-    
     if total_tokens <= TOKEN_BATCH_SIZE:
         return all_tokens.copy()
     
@@ -88,20 +85,26 @@ def get_random_batch_tokens(server_name, all_tokens):
 def load_tokens(server_name, for_visit=False):
     path = get_token_path(server_name, for_visit)
     
+    # Absolute fallback check to prevent Vercel environment path displacement issues
+    if not os.path.exists(path):
+        base_script_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = os.path.basename(path)
+        path = os.path.join(base_script_dir, filename)
+    
     try:
         with open(path, "r") as f:
             tokens = json.load(f)
-            if isinstance(tokens, list) and all(isinstance(t, dict) and "token" in t for t in tokens):
-                print(f"Loaded {len(tokens)} tokens from {path} for server {server_name}")
+            if isinstance(tokens, list):
+                print(f"Successfully Loaded {len(tokens)} tokens from {path} for server {server_name}")
                 return tokens
             else:
-                print(f"Warning: Token file {path} is not in the expected format. Returning empty list.")
+                print(f"Warning: Token file {path} parsed data is not a valid list array.")
                 return []
     except FileNotFoundError:
         print(f"Warning: Token file {path} not found. Returning empty list for server {server_name}.")
         return []
     except json.JSONDecodeError:
-        print(f"Warning: Token file {path} contains invalid JSON. Returning empty list.")
+        print(f"Warning: Token file {path} contains malformed or invalid JSON syntax.")
         return []
 
 def encrypt_message(plaintext):
@@ -133,7 +136,6 @@ async def send_single_like_request(encrypted_like_payload, token_dict, url):
     edata = bytes.fromhex(encrypted_like_payload)
     token_value = token_dict.get("token", "")
     if not token_value:
-        print("Warning: send_single_like_request received an empty or invalid token_dict.")
         return 999
 
     headers = {
@@ -150,19 +152,12 @@ async def send_single_like_request(encrypted_like_payload, token_dict, url):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status != 200:
-                    print(f"Like request failed for token {token_value[:10]}... with status: {response.status}")
                 return response.status
-    except asyncio.TimeoutError:
-        print(f"Like request timed out for token {token_value[:10]}...")
-        return 998
-    except Exception as e:
-        print(f"Exception in send_single_like_request for token {token_value[:10]}...: {e}")
+    except Exception:
         return 997
 
 async def send_likes_with_token_batch(uid, server_region_for_like_proto, like_api_url, token_batch_to_use):
     if not token_batch_to_use:
-        print("No tokens provided in the batch to send_likes_with_token_batch.")
         return []
 
     like_protobuf_payload = create_protobuf_message(uid, server_region_for_like_proto)
@@ -173,16 +168,11 @@ async def send_likes_with_token_batch(uid, server_region_for_like_proto, like_ap
         tasks.append(send_single_like_request(encrypted_like_payload, token_dict_for_request, like_api_url))
     
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    successful_sends = sum(1 for r in results if isinstance(r, int) and r == 200)
-    failed_sends = len(token_batch_to_use) - successful_sends
-    print(f"Attempted {len(token_batch_to_use)} like sends from batch. Successful: {successful_sends}, Failed/Error: {failed_sends}")
     return results
 
 def make_profile_check_request(encrypted_profile_payload, server_name, token_dict):
     token_value = token_dict.get("token", "")
     if not token_value:
-        print("Warning: make_profile_check_request received an empty token_dict.")
         return None
 
     if server_name == "IND":
@@ -207,24 +197,16 @@ def make_profile_check_request(encrypted_profile_payload, server_name, token_dic
     try:
         response = requests.post(url, data=edata, headers=headers, verify=False, timeout=10)
         response.raise_for_status()
-        binary_data = response.content
-        decoded_info = decode_protobuf_profile_info(binary_data)
-        return decoded_info
-    except requests.exceptions.HTTPError as e:
-        print(f"HTTP error in make_profile_check_request for token {token_value[:10]}...: {e.response.status_code} - {e.response.text[:100]}")
-    except requests.exceptions.RequestException as e:
-        print(f"Request error in make_profile_check_request for token {token_value[:10]}...: {e}")
-    except Exception as e:
-        print(f"Unexpected error in make_profile_check_request for token {token_value[:10]}... processing response: {e}")
-    return None
+        return decode_protobuf_profile_info(response.content)
+    except Exception:
+        return None
 
 def decode_protobuf_profile_info(binary_data):
     try:
         items = like_count_pb2.Info()
         items.ParseFromString(binary_data)
         return items
-    except Exception as e:
-        print(f"Error decoding Protobuf profile data: {e}")
+    except Exception:
         return None
 
 app = Flask(__name__)
@@ -242,32 +224,23 @@ def handle_requests():
     if not visit_tokens:
         return jsonify({"error": f"No visit tokens loaded for server {server_name_param}."}), 500
     
-    visit_token = visit_tokens[0] if visit_tokens else None
+    visit_token = visit_tokens
     
     all_available_tokens = load_tokens(server_name_param, for_visit=False)
     if not all_available_tokens:
         return jsonify({"error": f"No tokens loaded or token file invalid for server {server_name_param}."}), 500
 
-    print(f"Total tokens available for {server_name_param}: {len(all_available_tokens)}")
-
     if use_random:
         tokens_for_like_sending = get_random_batch_tokens(server_name_param, all_available_tokens)
-        print(f"Using RANDOM batch selection for {server_name_param}")
     else:
         tokens_for_like_sending = get_next_batch_tokens(server_name_param, all_available_tokens)
-        print(f"Using ROTATING batch selection for {server_name_param}")
     
     encrypted_player_uid_for_profile = enc_profile_check_payload(uid_param)
-    
     before_info = make_profile_check_request(encrypted_player_uid_for_profile, server_name_param, visit_token)
     before_like_count = 0
     
     if before_info and hasattr(before_info, 'AccountInfo'):
         before_like_count = int(before_info.AccountInfo.Likes)
-    else:
-        print(f"Could not reliably fetch 'before' profile info for UID {uid_param} on {server_name_param}.")
-
-    print(f"UID {uid_param} ({server_name_param}): Likes before = {before_like_count}")
 
     if server_name_param == "IND":
         like_api_url = "https://client.ind.freefiremobile.com/LikeProfile"
@@ -277,15 +250,12 @@ def handle_requests():
         like_api_url = "https://clientbp.ggblueshark.com/LikeProfile"
 
     if tokens_for_like_sending:
-        print(f"Using token batch for {server_name_param} (size {len(tokens_for_like_sending)}) to send likes.")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(send_likes_with_token_batch(uid_param, server_name_param, like_api_url, tokens_for_like_sending))
         finally:
             loop.close()
-    else:
-        print(f"Skipping like sending for UID {uid_param} as no tokens available for like sending.")
         
     after_info = make_profile_check_request(encrypted_player_uid_for_profile, server_name_param, visit_token)
     after_like_count = before_like_count
@@ -297,12 +267,6 @@ def handle_requests():
         actual_player_uid_from_profile = int(after_info.AccountInfo.UID)
         if after_info.AccountInfo.PlayerNickname:
             player_nickname_from_profile = str(after_info.AccountInfo.PlayerNickname)
-        else:
-            player_nickname_from_profile = "N/A"
-    else:
-        print(f"Could not reliably fetch 'after' profile info for UID {uid_param} on {server_name_param}.")
-
-    print(f"UID {uid_param} ({server_name_param}): Likes after = {after_like_count}")
 
     likes_increment = after_like_count - before_like_count
     request_status = 1 if likes_increment > 0 else (2 if likes_increment == 0 else 3)
@@ -322,7 +286,6 @@ def handle_requests():
 def token_info():
     servers = ["IND", "BD", "BR", "US", "SAC", "NA"]
     info = {}
-    
     for server in servers:
         regular_tokens = load_tokens(server, for_visit=False)
         visit_tokens = load_tokens(server, for_visit=True)
@@ -330,16 +293,11 @@ def token_info():
             "regular_tokens": len(regular_tokens),
             "visit_tokens": len(visit_tokens)
         }
-    
     return jsonify(info)
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "healthy", "service": "freefire-like-api"}), 200
-
-if __name__ != '__main__':
-    # When running on Gunicorn, create the event loop policy
-    pass
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
