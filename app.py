@@ -23,7 +23,9 @@ current_batch_indices = {}
 batch_indices_lock = threading.Lock()
 
 # Token paths (can be overridden via env vars)
-TOKEN_BASE_DIR = os.environ.get("TOKEN_DIR", "tokens")
+# Gets the absolute path of the directory containing app.py
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+TOKEN_BASE_DIR = os.environ.get("TOKEN_DIR", CURRENT_DIR)
 
 def get_token_path(server_name, for_visit=False):
     """Get token file path based on server and visit flag."""
