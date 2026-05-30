@@ -1,14 +1,15 @@
 {
   "version": 2,
-  "rewrites": [
+  "builds": [
     {
-      "source": "/(.*)",
-      "destination": "app.py"
+      "src": "app.py",
+      "use": "@vercel/python"
     }
   ],
-  "functions": {
-    "app.py": {
-      "includeFiles": "token_*.json"
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.py"
     }
-  }
+  ]
 }
